@@ -903,6 +903,64 @@ def test_incompatible_dimension_raises_error(problem):
         cub(f, a, b, rule)
 
 
+@pytest.mark.parametrize("problem", [
+    (
+        lambda x: np.exp(-x**2),
+        np.array([-np.inf]),
+        np.array([np.inf]),
+        math.sqrt(math.pi)
+    ),
+    (
+        lambda x: np.exp(-x**2),
+        np.array([np.inf]),
+        np.array([-np.inf]),
+        -math.sqrt(math.pi)
+    ),
+    (
+        lambda x: np.sqrt(x) * np.exp(-x),
+        np.array([0]),
+        np.array([np.inf]),
+        1/2 * math.sqrt(math.pi),
+    ),
+    (
+        lambda x: 1/x**2,
+        np.array([1]),
+        np.array([np.inf]),
+        1,
+    ),
+    (
+        lambda x: 1/x**2,
+        np.array([-np.inf]),
+        np.array([-1]),
+        1,
+    )
+])
+@pytest.mark.parametrize("rule", ["gk15"])
+@pytest.mark.parametrize("rtol", [1e-3])
+@pytest.mark.parametrize("atol", [1e-4])
+def test_infinite_limits(problem, rule, rtol, atol):
+    f, a, b, exact = problem
+
+    res = cub(
+        f,
+        a,
+        b,
+        rule,
+        rtol,
+        atol,
+    )
+
+    assert res.status == "converged"
+
+    assert_allclose(
+        res.estimate,
+        exact,
+        rtol=rtol,
+        atol=atol,
+        err_msg=f"error_estimate={res.error}, subdivisions={res.subdivisions}"
+    )
+
+
 def _eval_indefinite_integral(F, a, b):
     """
     Calculates a definite integral from points `a` to `b` by summing up over the corners

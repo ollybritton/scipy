@@ -201,6 +201,7 @@ def cub(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=10000,
     # Convert a and b to arrays of at least 1D
     a = np.atleast_1d(a)
     b = np.atleast_1d(b)
+    ndim = len(a)
 
     # If the rule is a string, convert to a corresponding product rule
     if isinstance(rule, str):
@@ -215,20 +216,61 @@ def cub(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=10000,
         if base_quadrature is None:
             raise ValueError(f"unknown rule {rule}")
 
-        rule = FixedProductErrorFromDifferenceCub([base_quadrature] * len(a))
+        rule = FixedProductErrorFromDifferenceCub([base_quadrature] * ndim)
 
     if a.ndim != 1 or b.ndim != 1:
         raise ValueError("a and b should be 1D arrays")
 
-    est = rule.estimate(f, a, b, args, kwargs)
+    initial_regions = [(a, b)]
 
-    try:
-        err = rule.error_estimate(f, a, b, args, kwargs)
-    except NotImplementedError:
-        raise ValueError("attempting cubature with a rule that doesn't implement error \
-estimation.")
+    def wrapped_f(x, *args, **kwargs):
+        return f(x, *args, **kwargs)
 
-    regions = [CubatureRegion(est, err, a, b)]
+    # Apply transformations
+    # For now, only handle one dimensional case
+    if ndim == 1:
+        # Transform from (-infty, +infty) to (-1, 1)
+        if (a[0] == -np.inf and b[0] == np.inf) or (a[0] == np.inf and b[0] == -np.inf):
+            sign = -1 if b[0] < 0 else 1
+            def wrapped_f(t):
+                x = (1 - np.abs(t)) / t
+                return sign * f(x) / (t**2)
+
+            initial_regions = [
+                (np.array([-1]), np.array([0])),
+                (np.array([0]), np.array([1]))
+            ]
+        elif (a[0] != -np.inf and b[0] == np.inf) or \
+                (a[0] == -np.inf and b[0] != np.inf):
+            sign = -1 if a[0] == -np.inf else 1
+            start = a if a[0] != -np.inf else b
+            def wrapped_f(t):
+                x = start + sign * (1 - t) / t
+                return f(x) / (t**2)
+
+            initial_regions = [
+                (np.array([0]), np.array([1]))
+            ]
+
+        # Transform from (start, +infty) to (0, 1)
+
+    regions = []
+    est = 0
+    err = 0
+
+    for a_k, b_k in initial_regions:
+        est_k = rule.estimate(wrapped_f, a_k, b_k, args, kwargs)
+
+        try:
+            err_k = rule.error_estimate(wrapped_f, a_k, b_k, args, kwargs)
+        except NotImplementedError:
+            raise ValueError("attempting cubature with a rule that doesn't implement \
+error estimation.")
+
+        regions.append(CubatureRegion(est_k, err_k, a_k, b_k))
+        est += est_k
+        err += err_k
+
     subdivisions = 0
     success = True
 
@@ -256,8 +298,8 @@ estimation.")
         # the error there, and push these regions onto the heap for potential further
         # subdividing.
         for a_k_sub, b_k_sub in _subregion_coordinates(a_k, b_k):
-            est_sub = rule.estimate(f, a_k_sub, b_k_sub, args, kwargs)
-            err_sub = rule.error_estimate(f, a_k_sub, b_k_sub, args, kwargs)
+            est_sub = rule.estimate(wrapped_f, a_k_sub, b_k_sub, args, kwargs)
+            err_sub = rule.error_estimate(wrapped_f, a_k_sub, b_k_sub, args, kwargs)
 
             est += est_sub
             err += err_sub
