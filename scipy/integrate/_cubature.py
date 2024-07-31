@@ -38,7 +38,7 @@ class CubatureResult:
 
 
 def cub(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=10000,
-        args=(), kwargs=None):
+        points=None, args=(), kwargs=None):
     r"""
     Adaptive cubature of multidimensional array-valued function.
 
@@ -221,48 +221,20 @@ def cub(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=10000,
     if a.ndim != 1 or b.ndim != 1:
         raise ValueError("a and b should be 1D arrays")
 
-    initial_regions = [(a, b)]
-
-    def wrapped_f(x, *args, **kwargs):
-        return f(x, *args, **kwargs)
-
-    # Apply transformations
-    # For now, only handle one dimensional case
-    if ndim == 1:
-        # Transform from (-infty, +infty) to (-1, 1)
-        if (a[0] == -np.inf and b[0] == np.inf) or (a[0] == np.inf and b[0] == -np.inf):
-            sign = -1 if b[0] < 0 else 1
-            def wrapped_f(t):
-                x = (1 - np.abs(t)) / t
-                return sign * f(x) / (t**2)
-
-            initial_regions = [
-                (np.array([-1]), np.array([0])),
-                (np.array([0]), np.array([1]))
-            ]
-        elif (a[0] != -np.inf and b[0] == np.inf) or \
-                (a[0] == -np.inf and b[0] != np.inf):
-            sign = -1 if a[0] == -np.inf else 1
-            start = a if a[0] != -np.inf else b
-            def wrapped_f(t):
-                x = start + sign * (1 - t) / t
-                return f(x) / (t**2)
-
-            initial_regions = [
-                (np.array([0]), np.array([1]))
-            ]
-
-        # Transform from (start, +infty) to (0, 1)
+    if points is None:
+        initial_regions = [(a, b)]
+    else:
+        initial_regions = _split_at_points(a, b, points)
 
     regions = []
     est = 0
     err = 0
 
     for a_k, b_k in initial_regions:
-        est_k = rule.estimate(wrapped_f, a_k, b_k, args, kwargs)
+        est_k = rule.estimate(f, a_k, b_k, args, kwargs)
 
         try:
-            err_k = rule.error_estimate(wrapped_f, a_k, b_k, args, kwargs)
+            err_k = rule.error_estimate(f, a_k, b_k, args, kwargs)
         except NotImplementedError:
             raise ValueError("attempting cubature with a rule that doesn't implement \
 error estimation.")
@@ -298,8 +270,8 @@ error estimation.")
         # the error there, and push these regions onto the heap for potential further
         # subdividing.
         for a_k_sub, b_k_sub in _subregion_coordinates(a_k, b_k):
-            est_sub = rule.estimate(wrapped_f, a_k_sub, b_k_sub, args, kwargs)
-            err_sub = rule.error_estimate(wrapped_f, a_k_sub, b_k_sub, args, kwargs)
+            est_sub = rule.estimate(f, a_k_sub, b_k_sub, args, kwargs)
+            err_sub = rule.error_estimate(f, a_k_sub, b_k_sub, args, kwargs)
 
             est += est_sub
             err += err_sub
@@ -328,10 +300,11 @@ error estimation.")
     )
 
 
-def _subregion_coordinates(a, b):
+def _subregion_coordinates(a, b, split_at=None):
     """
     Given the coordinates of a region like a=[0, 0] and b=[1, 1], yield the coordinates
-    of all subregions, which in this case would be::
+    of all subregions split at a specific point (by default the midpoint), which in this
+    case would be::
 
         ([0, 0], [1/2, 1/2]),
         ([0, 1/2], [1/2, 1]),
@@ -339,14 +312,42 @@ def _subregion_coordinates(a, b):
         ([1/2, 1/2], [1, 1])
     """
 
-    m = (a + b)/2
+    if split_at is None:
+        split_at = (a + b)/2
 
     for a_sub, b_sub in zip(
-        itertools.product(*np.array([a, m]).T),
-        itertools.product(*np.array([m, b]).T)
+        itertools.product(*np.array([a, split_at]).T),
+        itertools.product(*np.array([split_at, b]).T)
     ):
         yield np.array(a_sub), np.array(b_sub)
 
 
 def _max_norm(x):
     return np.max(np.abs(x))
+
+
+def _is_in_region(point, a, b):
+    if (point == a).all() or (point == b).all():
+        return False
+    return (a <= point).all() and (point <= b).all()
+
+
+def _split_at_points(a, b, points):
+    points = np.sort(points)
+
+    for i, point in enumerate(points):
+        if not _is_in_region(point, a, b):
+            continue
+
+        regions = []
+        points_ = np.delete(points, i, axis=0)
+
+        for a_k, b_k in _subregion_coordinates(a, b, point):
+            splits = _split_at_points(a_k, b_k, points_)
+
+            if splits is not None:
+                regions.extend(splits)
+
+        return regions
+
+    return [(a, b)]

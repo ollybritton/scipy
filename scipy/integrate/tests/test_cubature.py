@@ -13,6 +13,7 @@ from scipy.integrate._rules import (
 )
 
 from scipy.integrate._cubature import cub
+import scipy.special
 
 
 def genz_malik_1980_f_1(x, r, alphas):
@@ -948,6 +949,79 @@ def test_infinite_limits(problem, rule, rtol, atol):
         rule,
         rtol,
         atol,
+    )
+
+    assert res.status == "converged"
+
+    assert_allclose(
+        res.estimate,
+        exact,
+        rtol=rtol,
+        atol=atol,
+        err_msg=f"error_estimate={res.error}, subdivisions={res.subdivisions}"
+    )
+
+
+@pytest.mark.parametrize("problem", [
+    (
+        lambda x: x,
+        np.array([0]),
+        np.array([10]),
+        None,
+        50
+    ),
+    (
+        lambda x: np.sin(x)/x,
+        np.array([-1]),
+        np.array([2]),
+        [np.array([0])],
+        scipy.special.sici(1)[0] + scipy.special.sici(2)[0],
+    ),
+    (
+        lambda x: 1,
+        np.array([0, 0, 0]),
+        np.array([1, 1, 1]),
+        [
+            np.array([0.5, 0.5, 0.5]),
+        ],
+        1,
+    ),
+    (
+        lambda x: 1,
+        np.array([0, 0, 0]),
+        np.array([1, 1, 1]),
+        [
+            np.array([0.25, 0.25, 0.25]),
+            np.array([0.5, 0.5, 0.5]),
+        ],
+        1,
+    ),
+    (
+        lambda x: 1,
+        np.array([0, 0, 0]),
+        np.array([1, 1, 1]),
+        [
+            np.array([0.1, 0.25, 0.5]),
+            np.array([0.25, 0.25, 0.25]),
+            np.array([0.5, 0.5, 0.5]),
+        ],
+        1,
+    )
+])
+@pytest.mark.parametrize("rule", ["gk15"])
+@pytest.mark.parametrize("rtol", [1e-3])
+@pytest.mark.parametrize("atol", [1e-4])
+def test_break_points(problem, rule, rtol, atol):
+    f, a, b, points, exact = problem
+
+    res = cub(
+        f,
+        a,
+        b,
+        rule,
+        rtol,
+        atol,
+        points=points,
     )
 
     assert res.status == "converged"
