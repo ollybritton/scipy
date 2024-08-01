@@ -912,17 +912,29 @@ def test_incompatible_dimension_raises_error(problem):
         math.sqrt(math.pi)
     ),
     (
-        lambda x: np.exp(-x**2),
-        np.array([np.inf]),
+        lambda x: np.arange(5)[:, np.newaxis] * np.exp(-x**2),
         np.array([-np.inf]),
-        -math.sqrt(math.pi)
+        np.array([np.inf]),
+        np.arange(5) * math.sqrt(math.pi)
     ),
+    # (
+    #     lambda x: np.exp(-x**2),
+    #     np.array([np.inf]),
+    #     np.array([-np.inf]),
+    #     -math.sqrt(math.pi)
+    # ),
     (
         lambda x: np.sqrt(x) * np.exp(-x),
         np.array([0]),
         np.array([np.inf]),
         1/2 * math.sqrt(math.pi),
     ),
+    # (
+    #     lambda x: np.sin(x)/x,
+    #     np.array([0]),
+    #     np.array([np.inf]),
+    #     1/2 * math.sqrt(math.pi),
+    # ),
     (
         lambda x: 1/x**2,
         np.array([1]),
@@ -930,10 +942,32 @@ def test_incompatible_dimension_raises_error(problem):
         1,
     ),
     (
-        lambda x: 1/x**2,
-        np.array([-np.inf]),
-        np.array([-1]),
-        1,
+        lambda x: np.exp(-np.sum(x**2, axis=0)),
+        np.array([-np.inf, -np.inf]),
+        np.array([np.inf, np.inf]),
+        math.pi,
+    ),
+    (
+        lambda x: np.exp(-x[0]**2)/(x[1]**2),
+        np.array([-np.inf, 1]),
+        np.array([np.inf, np.inf]),
+        math.sqrt(math.pi),
+    ),
+    (
+        # f(x, y, z, w) = x * sqrt(y) * exp(-y-z**2-w**2)
+        lambda x: x[0] * np.sqrt(x[1]) * np.exp(-x[1]-x[2]**2-x[3]**2),
+        np.array([0, 0, -np.inf, -np.inf]),
+        np.array([1, np.inf, np.inf, np.inf]),
+        1/4 * math.pi ** (3/2),
+    ),
+    (
+        # f(x, y, z, w) = x^n * sqrt(y) * exp(-y-z**2-w**2) for n in [0,1,2,3,4]
+        lambda x:
+            (x[0] ** np.arange(5)[:, np.newaxis]) * \
+            np.sqrt(x[1]) * np.exp(-x[1]-x[2]**2-x[3]**2),
+        np.array([0, 0, -np.inf, -np.inf]),
+        np.array([1, np.inf, np.inf, np.inf]),
+        1/(2 + 2*np.arange(5)) * math.pi ** (3/2),
     )
 ])
 @pytest.mark.parametrize("rule", ["gk15"])

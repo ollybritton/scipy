@@ -198,6 +198,9 @@ def cub(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=10000,
     if kwargs is None:
         kwargs = dict()
 
+    if points is None:
+        points = []
+
     # Convert a and b to arrays of at least 1D
     a = np.atleast_1d(a)
     b = np.atleast_1d(b)
@@ -221,20 +224,33 @@ def cub(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=10000,
     if a.ndim != 1 or b.ndim != 1:
         raise ValueError("a and b should be 1D arrays")
 
-    if points is None:
-        initial_regions = [(a, b)]
+    f_transformed = InfiniteLimits(f, a, b)
+    a_transformed, b_transformed = f_transformed.limits
+    points.extend(f_transformed.points)
+
+    # If any problematic points are specified, divide the initial region so that
+    # these points lie on the edge of a subregion, which means f won't be evaluated
+    # there.
+    # TODO: document the problem where Newton-Cotes rules may have nodes on the boundary
+    # of a region
+    if points == []:
+        initial_regions = [(a_transformed, b_transformed)]
     else:
-        initial_regions = _split_at_points(a, b, points)
+        initial_regions = _split_at_points(a_transformed, b_transformed, points)
 
     regions = []
     est = 0
     err = 0
 
     for a_k, b_k in initial_regions:
-        est_k = rule.estimate(f, a_k, b_k, args, kwargs)
+        if (a_k == b_k).any():
+            # This is an empty region
+            continue
+
+        est_k = rule.estimate(f_transformed, a_k, b_k, args, kwargs)
 
         try:
-            err_k = rule.error_estimate(f, a_k, b_k, args, kwargs)
+            err_k = rule.error_estimate(f_transformed, a_k, b_k, args, kwargs)
         except NotImplementedError:
             raise ValueError("attempting cubature with a rule that doesn't implement \
 error estimation.")
@@ -270,8 +286,8 @@ error estimation.")
         # the error there, and push these regions onto the heap for potential further
         # subdividing.
         for a_k_sub, b_k_sub in _subregion_coordinates(a_k, b_k):
-            est_sub = rule.estimate(f, a_k_sub, b_k_sub, args, kwargs)
-            err_sub = rule.error_estimate(f, a_k_sub, b_k_sub, args, kwargs)
+            est_sub = rule.estimate(f_transformed, a_k_sub, b_k_sub, args, kwargs)
+            err_sub = rule.error_estimate(f_transformed, a_k_sub, b_k_sub, args, kwargs)
 
             est += est_sub
             err += err_sub
@@ -298,6 +314,88 @@ error estimation.")
         atol=atol,
         rtol=rtol,
     )
+
+
+class Transform:
+    @property
+    def limits(self):
+        raise NotImplementedError
+
+    @property
+    def points(self):
+        return []
+
+    def __call__(self, x, *args, **kwargs):
+        raise NotImplementedError
+
+
+class InfiniteLimits(Transform):
+    def __init__(self, f, a, b):
+        self._f = f
+        self._orig_a = a
+        self._orig_b = b
+
+        self._semi_infinite_axes = []
+        self._double_infinite_axes = []
+
+        for i in range(len(a)):
+            if a[i] == -np.inf and b[i] == np.inf:
+                # (-oo, oo) will be mapped to (-1, 1)
+                self._double_infinite_axes.append(i)
+            elif a[i] != -np.inf and b[i] == np.inf:
+                # (start, oo) will be mapped to (0, 1)
+                self._semi_infinite_axes.append(i)
+
+        self._semi_infinite_axes = np.array(self._semi_infinite_axes)
+        self._double_infinite_axes = np.array(self._double_infinite_axes)
+
+    @property
+    def limits(self):
+        a, b = np.copy(self._orig_a), np.copy(self._orig_b)
+
+        for index in self._double_infinite_axes:
+            a[index] = -1
+            b[index] = 1
+
+        for index in self._semi_infinite_axes:
+            a[index] = 0
+            b[index] = 1
+
+        return a, b
+
+    @property
+    def points(self):
+        # If there are infinite limits, then the origin will be a problematic point
+        # due to division by zero there
+        if self._double_infinite_axes.size != 0 or self._semi_infinite_axes.size != 0:
+            return [np.zeros(self._orig_a.shape)]
+        else:
+            return []
+
+    def __call__(self, t, *args, **kwargs):
+        x = np.copy(t)
+
+        # x = (1-|t|)/t
+        if self._double_infinite_axes.size != 0:
+            x[self._double_infinite_axes] = (
+                1 - np.abs(t[self._double_infinite_axes])
+            ) / t[self._double_infinite_axes]
+
+        # x = start + (1 - t)/t
+        if self._semi_infinite_axes.size != 0:
+            x[self._semi_infinite_axes] = self._orig_a[self._semi_infinite_axes] + (
+                1 - t[self._semi_infinite_axes]
+            ) / t[self._semi_infinite_axes]
+
+        f_x = self._f(x, *args, **kwargs)
+
+        if self._double_infinite_axes.size != 0:
+            f_x /= np.prod(t[self._double_infinite_axes] ** 2, axis=0)
+
+        if self._semi_infinite_axes.size != 0:
+            f_x /= np.prod(t[self._semi_infinite_axes] ** 2, axis=0)
+
+        return f_x
 
 
 def _subregion_coordinates(a, b, split_at=None):
