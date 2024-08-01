@@ -37,8 +37,12 @@ class CubatureResult:
     rtol: float
 
 
-def cub(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=10000,
-        points=None, args=(), kwargs=None):
+def cub(f, a, b,
+        rule="gk21",
+        rtol=1e-05, atol=1e-08,
+        max_subdivisions=10000,
+        points=None,
+        args=(), kwargs=None):
     r"""
     Adaptive cubature of multidimensional array-valued function.
 
@@ -224,9 +228,14 @@ def cub(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=10000,
     if a.ndim != 1 or b.ndim != 1:
         raise ValueError("a and b should be 1D arrays")
 
-    f_transformed = InfiniteLimits(f, a, b)
-    a_transformed, b_transformed = f_transformed.limits
-    points.extend(f_transformed.points)
+    # Apply any variable transformations to e.g. handle infinite limits
+    if np.isinf(a).any() or np.isinf(b).any():
+        f_transformed = InfiniteLimitsTransform(f, a, b)
+        a_transformed, b_transformed = f_transformed.limits
+        points.extend(f_transformed.points)
+    else:
+        f_transformed = f
+        a_transformed, b_transformed = a, b
 
     # If any problematic points are specified, divide the initial region so that
     # these points lie on the edge of a subregion, which means f won't be evaluated
@@ -242,9 +251,11 @@ def cub(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=10000,
     est = 0
     err = 0
 
+    # Compute the estimates over the initial regions
     for a_k, b_k in initial_regions:
         if (a_k == b_k).any():
-            # This is an empty region
+            # If any of the initial regions have zero width in one dimension, we can
+            # ignore this as the integral will be 0 there.
             continue
 
         est_k = rule.estimate(f_transformed, a_k, b_k, args, kwargs)
@@ -316,7 +327,7 @@ error estimation.")
     )
 
 
-class Transform:
+class VariableTransform:
     @property
     def limits(self):
         raise NotImplementedError
@@ -329,7 +340,7 @@ class Transform:
         raise NotImplementedError
 
 
-class InfiniteLimits(Transform):
+class InfiniteLimitsTransform(VariableTransform):
     def __init__(self, f, a, b):
         self._f = f
         self._orig_a = a
@@ -366,7 +377,7 @@ class InfiniteLimits(Transform):
     @property
     def points(self):
         # If there are infinite limits, then the origin will be a problematic point
-        # due to division by zero there
+        # due to a division by zero there
         if self._double_infinite_axes.size != 0 or self._semi_infinite_axes.size != 0:
             return [np.zeros(self._orig_a.shape)]
         else:
@@ -375,15 +386,17 @@ class InfiniteLimits(Transform):
     def __call__(self, t, *args, **kwargs):
         x = np.copy(t)
 
-        # x = (1-|t|)/t
         if self._double_infinite_axes.size != 0:
+            # For (-oo, oo) -> (-1, 1), use the transformation x = (1-|t|)/t
             x[self._double_infinite_axes] = (
                 1 - np.abs(t[self._double_infinite_axes])
             ) / t[self._double_infinite_axes]
 
-        # x = start + (1 - t)/t
         if self._semi_infinite_axes.size != 0:
-            x[self._semi_infinite_axes] = self._orig_a[self._semi_infinite_axes] + (
+            # For (start, oo) -> (0, 1), use the transformation x = start + (1 - t)/t
+            # Need to expand start so it is broadcastable
+            start = self._orig_a[self._semi_infinite_axes][:, np.newaxis]
+            x[self._semi_infinite_axes] = start + (
                 1 - t[self._semi_infinite_axes]
             ) / t[self._semi_infinite_axes]
 

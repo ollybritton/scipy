@@ -906,98 +906,6 @@ def test_incompatible_dimension_raises_error(problem):
 
 @pytest.mark.parametrize("problem", [
     (
-        lambda x: np.exp(-x**2),
-        np.array([-np.inf]),
-        np.array([np.inf]),
-        math.sqrt(math.pi)
-    ),
-    (
-        lambda x: np.arange(5)[:, np.newaxis] * np.exp(-x**2),
-        np.array([-np.inf]),
-        np.array([np.inf]),
-        np.arange(5) * math.sqrt(math.pi)
-    ),
-    # (
-    #     lambda x: np.exp(-x**2),
-    #     np.array([np.inf]),
-    #     np.array([-np.inf]),
-    #     -math.sqrt(math.pi)
-    # ),
-    (
-        lambda x: np.sqrt(x) * np.exp(-x),
-        np.array([0]),
-        np.array([np.inf]),
-        1/2 * math.sqrt(math.pi),
-    ),
-    # (
-    #     lambda x: np.sin(x)/x,
-    #     np.array([0]),
-    #     np.array([np.inf]),
-    #     1/2 * math.sqrt(math.pi),
-    # ),
-    (
-        lambda x: 1/x**2,
-        np.array([1]),
-        np.array([np.inf]),
-        1,
-    ),
-    (
-        lambda x: np.exp(-np.sum(x**2, axis=0)),
-        np.array([-np.inf, -np.inf]),
-        np.array([np.inf, np.inf]),
-        math.pi,
-    ),
-    (
-        lambda x: np.exp(-x[0]**2)/(x[1]**2),
-        np.array([-np.inf, 1]),
-        np.array([np.inf, np.inf]),
-        math.sqrt(math.pi),
-    ),
-    (
-        # f(x, y, z, w) = x * sqrt(y) * exp(-y-z**2-w**2)
-        lambda x: x[0] * np.sqrt(x[1]) * np.exp(-x[1]-x[2]**2-x[3]**2),
-        np.array([0, 0, -np.inf, -np.inf]),
-        np.array([1, np.inf, np.inf, np.inf]),
-        1/4 * math.pi ** (3/2),
-    ),
-    (
-        # f(x, y, z, w) = x^n * sqrt(y) * exp(-y-z**2-w**2) for n in [0,1,2,3,4]
-        lambda x:
-            (x[0] ** np.arange(5)[:, np.newaxis]) * \
-            np.sqrt(x[1]) * np.exp(-x[1]-x[2]**2-x[3]**2),
-        np.array([0, 0, -np.inf, -np.inf]),
-        np.array([1, np.inf, np.inf, np.inf]),
-        1/(2 + 2*np.arange(5)) * math.pi ** (3/2),
-    )
-])
-@pytest.mark.parametrize("rule", ["gk15"])
-@pytest.mark.parametrize("rtol", [1e-3])
-@pytest.mark.parametrize("atol", [1e-4])
-def test_infinite_limits(problem, rule, rtol, atol):
-    f, a, b, exact = problem
-
-    res = cub(
-        f,
-        a,
-        b,
-        rule,
-        rtol,
-        atol,
-    )
-
-    assert res.status == "converged"
-
-    assert_allclose(
-        res.estimate,
-        exact,
-        rtol=rtol,
-        atol=atol,
-        err_msg=f"error_estimate={res.error}, subdivisions={res.subdivisions}"
-    )
-
-
-@pytest.mark.parametrize("problem", [
-    (
         lambda x: x,
         np.array([0]),
         np.array([10]),
@@ -1083,3 +991,130 @@ def _eval_indefinite_integral(F, a, b):
         out += pow(-1, sum(ind) + ndim) * F(points[ind, tuple(range(ndim))])
 
     return out
+
+
+def infinite_limits_problem_func_gaussian(x, alphas):
+    r"""
+    Notes
+    -----
+
+    .. math:: f(\mathbf x) = \exp\left(-\sum^n_{i = 1} (\alpha_i x_i)^2 \right)
+
+    """
+    ndim = x.shape[0]
+    num_eval_points = x.shape[-1]
+
+    alphas_reshaped = np.expand_dims(alphas, -1)
+
+    x_reshaped = x.reshape(ndim, *([1]*(len(alphas.shape) - 1)), num_eval_points)
+
+    return np.exp(
+        -np.sum((alphas_reshaped * x_reshaped)**2, axis=0)
+    )
+
+
+def infinite_limits_problem_func_gaussian_exact(a, b, alphas):
+    # Exact only for a and b describing either doubly infinite or semi infinite
+    # intervals
+
+    ndim = len(a)
+    double_infinite_count = 0
+    semi_infinite_count = 0
+
+    for i in range(len(a)):
+        if np.isinf(a[i]) and np.isinf(b[i]):
+            double_infinite_count += 1
+        elif not np.isinf(a[i]) and np.isinf(b[i]):
+            semi_infinite_count += 1
+
+    return (math.sqrt(np.pi) ** ndim) / (
+        2**semi_infinite_count * np.prod(alphas, axis=0)
+    )
+
+
+def infinite_limits_test_problem_func_gaussian_random_args(shape):
+    alphas = np.random.rand(*shape)
+
+    # If alphas are very close to 0 this makes the problem very difficult due to large
+    # values of ``f``.
+    alphas *= 10
+
+    return alphas
+
+
+@pytest.mark.parametrize("problem", [
+    (
+        # Function to integrate
+        infinite_limits_problem_func_gaussian,
+
+        # Exact solution
+        infinite_limits_problem_func_gaussian_exact,
+
+        # Arguments passed to f
+        (
+            infinite_limits_test_problem_func_gaussian_random_args((1, 1)),
+        ),
+
+        # Limits, has to match the shape of the arguments
+        np.array([-np.inf]),  # a
+        np.array([np.inf]),   # b
+    ),
+    (
+        infinite_limits_problem_func_gaussian,
+        infinite_limits_problem_func_gaussian_exact,
+        (
+            infinite_limits_test_problem_func_gaussian_random_args((4, 1)),
+        ),
+        np.array([0, 0, -np.inf, -np.inf]),          # a
+        np.array([np.inf, np.inf, np.inf, np.inf]),  # b
+    ),
+    (
+        infinite_limits_problem_func_gaussian,
+        infinite_limits_problem_func_gaussian_exact,
+        (
+            infinite_limits_test_problem_func_gaussian_random_args((3, 2, 2)),
+        ),
+        np.array([-np.inf, 0, -np.inf]),          # a
+        np.array([np.inf, np.inf, np.inf]),       # b
+    ),
+    (
+        # f(x, y, z, w) = x^n * sqrt(y) * exp(-y-z**2-w**2) for n in [0,1,2,3,4]
+        lambda x, n:
+            (x[0] ** n[:, np.newaxis]) * \
+            np.sqrt(x[1]) * np.exp(-x[1]-x[2]**2-x[3]**2),
+
+        # This exact solution is for the below limits, not in general
+        lambda a, b, n: 1/(2 + 2*n) * math.pi ** (3/2),
+
+        (np.arange(5),),
+        np.array([0, 0, -np.inf, -np.inf]),
+        np.array([1, np.inf, np.inf, np.inf]),
+    )
+])
+@pytest.mark.parametrize("rule", ["gk15"])
+@pytest.mark.parametrize("rtol", [1e-3])
+@pytest.mark.parametrize("atol", [1e-4])
+def test_cub_infinite_limits(problem, rule, rtol, atol):
+    np.random.seed(1)
+
+    f, exact, args, a, b = problem
+
+    res = cub(
+        f,
+        a,
+        b,
+        rule,
+        rtol,
+        atol,
+        args=args,
+    )
+
+    assert res.status == "converged"
+
+    assert_allclose(
+        res.estimate,
+        exact(a, b, *args),
+        rtol=rtol,
+        atol=atol,
+        err_msg=f"error_estimate={res.error}, subdivisions={res.subdivisions}"
+    )
