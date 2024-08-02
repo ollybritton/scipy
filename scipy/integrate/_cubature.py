@@ -229,7 +229,7 @@ def cub(f, a, b,
         raise ValueError("a and b should be 1D arrays")
 
     # Apply any variable transformations to e.g. handle infinite limits
-    if np.isinf(a).any() or np.isinf(b).any():
+    if np.any(np.isinf(a)) or np.any(np.isinf(b)):
         f_transformed = InfiniteLimitsTransform(f, a, b)
         a_transformed, b_transformed = f_transformed.limits
         points.extend(f_transformed.points)
@@ -253,22 +253,20 @@ def cub(f, a, b,
 
     # Compute the estimates over the initial regions
     for a_k, b_k in initial_regions:
-        if (a_k == b_k).any():
-            # If any of the initial regions have zero width in one dimension, we can
-            # ignore this as the integral will be 0 there.
-            continue
+        # If any of the initial regions have zero width in one dimension, we can
+        # ignore this as the integral will be 0 there.
+        if not np.any(a_k == b_k):
+            est_k = rule.estimate(f_transformed, a_k, b_k, args, kwargs)
 
-        est_k = rule.estimate(f_transformed, a_k, b_k, args, kwargs)
+            try:
+                err_k = rule.error_estimate(f_transformed, a_k, b_k, args, kwargs)
+            except NotImplementedError:
+                raise ValueError("attempting cubature with a rule that doesn't \
+implement error estimation.")
 
-        try:
-            err_k = rule.error_estimate(f_transformed, a_k, b_k, args, kwargs)
-        except NotImplementedError:
-            raise ValueError("attempting cubature with a rule that doesn't implement \
-error estimation.")
-
-        regions.append(CubatureRegion(est_k, err_k, a_k, b_k))
-        est += est_k
-        err += err_k
+            regions.append(CubatureRegion(est_k, err_k, a_k, b_k))
+            est += est_k
+            err += err_k
 
     subdivisions = 0
     success = True
@@ -447,18 +445,16 @@ def _split_at_points(a, b, points):
     points = np.sort(points)
 
     for i, point in enumerate(points):
-        if not _is_in_region(point, a, b):
-            continue
+        if _is_in_region(point, a, b):
+            regions = []
+            points_ = np.delete(points, i, axis=0)
 
-        regions = []
-        points_ = np.delete(points, i, axis=0)
+            for a_k, b_k in _subregion_coordinates(a, b, point):
+                splits = _split_at_points(a_k, b_k, points_)
 
-        for a_k, b_k in _subregion_coordinates(a, b, point):
-            splits = _split_at_points(a_k, b_k, points_)
+                if splits is not None:
+                    regions.extend(splits)
 
-            if splits is not None:
-                regions.extend(splits)
-
-        return regions
+            return regions
 
     return [(a, b)]
