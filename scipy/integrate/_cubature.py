@@ -179,6 +179,17 @@ def cubature(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=1000
 
     When this is done with process-based parallelization (as would be the case passing
     `workers` as an integer, you should ensure the main module is import-safe.
+
+    Notes
+    -----
+
+    If passing a list of `points`, the corresponding rule should not evaluate `f` at the
+    boundary of a region. For this reason, it's not possible to use `points` and
+    ``NewtonCotes()`` at the same time.
+
+    If using process-based parallelization, as is the case when `workers` is an integer
+    not equal to 1, or using `multiprocessing.Pool.map`, the main module needs to be
+    import-safe.
     """
 
     # It is also possible to use a custom rule, but this is not yet part of the public
@@ -189,11 +200,16 @@ def cubature(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=1000
     points = [] if points is None else points
 
     # Convert a and b to arrays of at least 1D
-    a = np.atleast_1d(a)
-    b = np.atleast_1d(b)
+    a_orig = np.atleast_1d(a)
+    b_orig = np.atleast_1d(b)
 
-    if a.ndim != 1 or b.ndim != 1:
+    if a_orig.ndim != 1 or b_orig.ndim != 1:
         raise ValueError("a and b should be 1D arrays")
+
+    # If any limits are the wrong way around, flip them and keep track of the sign.
+    sign = (-1) ** np.sum(a_orig > b_orig)  # false = 0, true = 1
+    a = np.min([a_orig, b_orig], axis=0)
+    b = np.max([a_orig, b_orig], axis=0)
 
     # Apply any variable transformations to e.g. handle infinite limits
     if np.any(np.isinf(a)) or np.any(np.isinf(b)):
@@ -205,16 +221,14 @@ def cubature(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=1000
         a_transformed, b_transformed = a, b
 
     # If any problematic points are specified, divide the initial region so that
-    # these points lie on the edge of a subregion, which means f won't be evaluated
-    # there.
-    # TODO: document the problem where Newton-Cotes rules may have nodes on the boundary
-    # of a region
+    # these points lie on the edge of a subregion, which means ``f`` won't be evaluated
+    # there (if the rule being used has no evaluation points on the boundary).
     if points == []:
         initial_regions = [(a_transformed, b_transformed)]
     else:
         initial_regions = _split_at_points(a_transformed, b_transformed, points)
 
-    # If the rule is a string, convert to a corresponding product rule
+    # If the rule is a string, convert to a corresponding rule:
     if isinstance(rule, str):
         ndim = len(a)
 
@@ -320,7 +334,10 @@ implement error estimation.")
         status = "converged" if success else "not_converged"
 
         return CubatureResult(
-            estimate=est,
+            # Remember to multiply by sign determined from whether limits were correct
+            # way around:
+            estimate=sign*est,
+
             error=err,
             success=success,
             status=status,
@@ -382,6 +399,7 @@ class InfiniteLimitsTransform(VariableTransform):
         self._orig_a = a
         self._orig_b = b
 
+        self._negate_var = []
         self._semi_infinite_axes = []
         self._double_infinite_axes = []
 
@@ -392,9 +410,21 @@ class InfiniteLimitsTransform(VariableTransform):
             elif a[i] != -np.inf and b[i] == np.inf:
                 # (start, oo) will be mapped to (0, 1)
                 self._semi_infinite_axes.append(i)
+            elif a[i] == -np.inf and b[i] != np.inf:
+                # (-oo, end) will be mapped to (0, 1)
+                # This is handled by making the transformation t = -x and reducing it to
+                # the other semi-infinite case.
+                self._negate_var.append(i)
+                self._semi_infinite_axes.append(i)
+
+                # Since we flip the limits, we don't need to separately multiply the
+                # integrand by -1.
+                self._orig_a[i] = -b[i]
+                self._orig_b[i] = -a[i]
 
         self._semi_infinite_axes = np.array(self._semi_infinite_axes)
         self._double_infinite_axes = np.array(self._double_infinite_axes)
+        self._negate_var = np.array(self._negate_var)
 
     @property
     def limits(self):
@@ -422,14 +452,18 @@ class InfiniteLimitsTransform(VariableTransform):
     def __call__(self, t, *args, **kwargs):
         x = np.copy(t)
 
+        if len(self._negate_var) != 0:
+            x[..., self._negate_var] *= -1
+
         if self._double_infinite_axes.size != 0:
-            # For (-oo, oo) -> (-1, 1), use the transformation x = (1-|t|)/t
+            # For (-oo, oo) -> (-1, 1), use the transformation x = (1-|t|)/t.
             x[..., self._double_infinite_axes] = (
                 1 - np.abs(t[..., self._double_infinite_axes])
             ) / t[..., self._double_infinite_axes]
 
         if self._semi_infinite_axes.size != 0:
-            # For (start, oo) -> (0, 1), use the transformation x = start + (1 - t)/t
+            # For (start, oo) -> (0, 1), use the transformation x = start + (1 - t)/t.
+            #
             # Need to expand start so it is broadcastable, and transpose to flip the
             # axis order.
             start = self._orig_a[self._semi_infinite_axes][:, np.newaxis].T

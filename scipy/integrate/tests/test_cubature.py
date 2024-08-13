@@ -778,6 +778,27 @@ def test_can_pass_list_to_cub():
     )
 
 
+def test_limits_other_way_around():
+    n = np.arange(5)
+
+    a = [2]
+    b = [0]
+
+    res = cubature(
+        basic_1d_integrand,
+        a,
+        b,
+        args=(n,)
+    )
+
+    assert_allclose(
+        res.estimate,
+        -basic_1d_integrand_exact(n),
+        rtol=1e-1,
+        atol=0,
+    )
+
+
 @pytest.mark.parametrize("quadrature_pair", [
     (NewtonCotesQuadrature(10), NewtonCotesQuadrature(5)),
     (GaussLegendreQuadrature(10), GaussLegendreQuadrature(5))
@@ -1015,16 +1036,20 @@ def inf_limits_f_gaussian(x, alphas):
 
 
 def inf_limits_f_gaussian_exact(a, b, alphas):
-    # Exact only for a and b describing either doubly-inf or semi-inf intervals
+    # Exact only for a and b where each integral has limits like
+    #   (-oo, oo), or
+    #   (0, oo), or
+    #   (-oo, 0)
+    # for each variable, not for arbitrary a and b.
 
     ndim = len(a)
     double_infinite_count = 0
     semi_infinite_count = 0
 
     for i in range(len(a)):
-        if np.isinf(a[i]) and np.isinf(b[i]):
+        if np.isinf(a[i]) and np.isinf(b[i]):   # doubly-infinite
             double_infinite_count += 1
-        elif not np.isinf(a[i]) and np.isinf(b[i]):
+        elif np.isinf(a[i]) != np.isinf(b[i]):  # XOR, semi-infinite
             semi_infinite_count += 1
 
     return (math.sqrt(np.pi) ** ndim) / (
@@ -1033,7 +1058,7 @@ def inf_limits_f_gaussian_exact(a, b, alphas):
 
 
 def inf_limits_f_gaussian_random_args(shape):
-    np.random.seed(1)
+    np.random.seed(12)
 
     alphas = np.random.rand(*shape)
 
@@ -1075,20 +1100,37 @@ def inf_limits_f_mixed_exact(a, b, n):
     (
         inf_limits_f_gaussian,
         inf_limits_f_gaussian_exact,
-        (
-            inf_limits_f_gaussian_random_args((1, 4)),
-        ),
-        np.array([0, 0, -np.inf, -np.inf]),          # a
-        np.array([np.inf, np.inf, np.inf, np.inf]),  # b
+        (inf_limits_f_gaussian_random_args((1, 1)),),
+        np.array([0]),
+        np.array([np.inf]),
     ),
     (
         inf_limits_f_gaussian,
         inf_limits_f_gaussian_exact,
-        (
-            inf_limits_f_gaussian_random_args((2, 2, 3)),
-        ),
-        np.array([-np.inf, 0, -np.inf]),          # a
-        np.array([np.inf, np.inf, np.inf]),       # b
+        (inf_limits_f_gaussian_random_args((1, 1)),),
+        np.array([-np.inf]),
+        np.array([0]),
+    ),
+    (
+        inf_limits_f_gaussian,
+        inf_limits_f_gaussian_exact,
+        (inf_limits_f_gaussian_random_args((1, 4)),),
+        np.array([0, 0, -np.inf, -np.inf]),
+        np.array([np.inf, np.inf, np.inf, np.inf]),
+    ),
+    (
+        inf_limits_f_gaussian,
+        inf_limits_f_gaussian_exact,
+        (inf_limits_f_gaussian_random_args((1, 4)),),
+        np.array([-np.inf, -np.inf, -np.inf, -np.inf]),
+        np.array([0, 0, np.inf, np.inf]),
+    ),
+    (
+        inf_limits_f_gaussian,
+        inf_limits_f_gaussian_exact,
+        (inf_limits_f_gaussian_random_args((2, 2, 3)),),
+        np.array([-np.inf, 0, -np.inf]),
+        np.array([np.inf, np.inf, np.inf]),
     ),
     (
         # f(x, y, z, w) = x^n * sqrt(y) * exp(-y-z**2-w**2) for n in [0,1,2,3,4]
