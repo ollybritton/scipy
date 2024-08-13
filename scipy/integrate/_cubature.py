@@ -294,7 +294,7 @@ implement error estimation.")
             # further subdividing.
 
             executor_args = zip(
-                itertools.repeat(f),
+                itertools.repeat(f_transformed),
                 itertools.repeat(rule),
                 itertools.repeat(args),
                 itertools.repeat(kwargs),

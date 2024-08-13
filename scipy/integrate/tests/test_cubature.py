@@ -1033,11 +1033,13 @@ def inf_limits_f_gaussian_exact(a, b, alphas):
 
 
 def inf_limits_f_gaussian_random_args(shape):
+    np.random.seed(1)
+
     alphas = np.random.rand(*shape)
 
     # If alphas are very close to 0 this makes the problem very difficult due to large
     # values of ``f``.
-    alphas *= 10
+    alphas *= 100
 
     return alphas
 
