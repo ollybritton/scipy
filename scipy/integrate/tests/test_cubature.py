@@ -220,6 +220,22 @@ def genz_malik_1980_f_4_exact(a, b, alphas):
     return _eval_indefinite_integral(F, a, b)
 
 
+def _eval_indefinite_integral(F, a, b):
+    """
+    Calculates a definite integral from points `a` to `b` by summing up over the corners
+    of the corresponding hyperrectangle.
+    """
+
+    ndim = len(a)
+    points = np.stack([a, b], axis=0)
+
+    out = 0
+    for ind in itertools.product(range(2), repeat=ndim):
+        out += pow(-1, sum(ind) + ndim) * F(points[ind, tuple(range(ndim))])
+
+    return out
+
+
 def genz_malik_1980_f_4_random_args(shape):
     ndim = shape[-1]
 
@@ -765,6 +781,27 @@ def test_can_pass_list_to_cub():
     )
 
 
+def test_limits_other_way_around():
+    n = np.arange(5)
+
+    a = [2]
+    b = [0]
+
+    res = cubature(
+        basic_1d_integrand,
+        a,
+        b,
+        args=(n,)
+    )
+
+    assert_allclose(
+        res.estimate,
+        -basic_1d_integrand_exact(n),
+        rtol=1e-1,
+        atol=0,
+    )
+
+
 @pytest.mark.parametrize("quadrature_pair", [
     (NewtonCotesQuadrature(10), NewtonCotesQuadrature(5)),
     (GaussLegendreQuadrature(10), GaussLegendreQuadrature(5))
@@ -824,6 +861,79 @@ def test_cub_with_kwargs(rule):
         exact,
         rtol=1e-3,
         atol=1e-4,
+    )
+
+
+@pytest.mark.parametrize("problem", [
+    (
+        lambda x: x,
+        np.array([0]),
+        np.array([10]),
+        None,
+        50
+    ),
+    (
+        lambda x: np.sin(x)/x,
+        np.array([-1]),
+        np.array([2]),
+        [np.array([0])],
+        scipy.special.sici(1)[0] + scipy.special.sici(2)[0],
+    ),
+    (
+        lambda x: np.ones(len(x)),
+        np.array([0, 0, 0]),
+        np.array([1, 1, 1]),
+        [
+            np.array([0.5, 0.5, 0.5]),
+        ],
+        1,
+    ),
+    (
+        lambda x: np.ones(len(x)),
+        np.array([0, 0, 0]),
+        np.array([1, 1, 1]),
+        [
+            np.array([0.25, 0.25, 0.25]),
+            np.array([0.5, 0.5, 0.5]),
+        ],
+        1,
+    ),
+    (
+        lambda x: np.ones(len(x)),
+        np.array([0, 0, 0]),
+        np.array([1, 1, 1]),
+        [
+            np.array([0.1, 0.25, 0.5]),
+            np.array([0.25, 0.25, 0.25]),
+            np.array([0.5, 0.5, 0.5]),
+        ],
+        1,
+    )
+])
+@pytest.mark.parametrize("rule", ["gk15"])
+@pytest.mark.parametrize("rtol", [1e-3])
+@pytest.mark.parametrize("atol", [1e-4])
+def test_break_points(problem, rule, rtol, atol):
+    f, a, b, points, exact = problem
+
+    res = cubature(
+        f,
+        a,
+        b,
+        rule,
+        rtol,
+        atol,
+        points=points,
+    )
+
+    assert res.status == "converged"
+
+    assert_allclose(
+        res.estimate,
+        exact,
+        rtol=rtol,
+        atol=atol,
+        err_msg=f"error_estimate={res.error}, subdivisions={res.subdivisions}"
     )
 
 
@@ -911,17 +1021,281 @@ def test_incompatible_dimension_raises_error(problem):
         cubature(basic_1d_integrand, a, b, rule)
 
 
-def _eval_indefinite_integral(F, a, b):
+def inf_limits_f_gaussian(x, alphas):
+    r"""
+    Notes
+    -----
+
+    .. math:: f(\mathbf x) = \exp\left(-\sum^n_{i = 1} (\alpha_i x_i)^2 \right)
+
     """
-    Calculates a definite integral from points `a` to `b` by summing up over the corners
-    of the corresponding hyperrectangle.
-    """
+    npoints, ndim = x.shape[0], x.shape[-1]
+    alphas_reshaped = alphas[np.newaxis, :]
+    x_reshaped = x.reshape(npoints, *([1]*(len(alphas.shape) - 1)), ndim)
+
+    return np.exp(
+        -np.sum((alphas_reshaped * x_reshaped)**2, axis=-1)
+    )
+
+
+def inf_limits_f_gaussian_exact(a, b, alphas):
+    # Exact only for a and b where each integral has limits like
+    #   (-oo, oo), or
+    #   (0, oo), or
+    #   (-oo, 0)
+    # for each variable, not for arbitrary a and b.
 
     ndim = len(a)
-    points = np.stack([a, b], axis=0)
+    double_infinite_count = 0
+    semi_infinite_count = 0
 
-    out = 0
-    for ind in itertools.product(range(2), repeat=ndim):
-        out += pow(-1, sum(ind) + ndim) * F(points[ind, tuple(range(ndim))])
+    for i in range(len(a)):
+        if np.isinf(a[i]) and np.isinf(b[i]):   # doubly-infinite
+            double_infinite_count += 1
+        elif np.isinf(a[i]) != np.isinf(b[i]):  # XOR, semi-infinite
+            semi_infinite_count += 1
 
-    return out
+    return (math.sqrt(np.pi) ** ndim) / (
+        2**semi_infinite_count * np.prod(alphas, axis=-1)
+    )
+
+
+def inf_limits_f_gaussian_random_args(shape):
+    np.random.seed(12)
+
+    alphas = np.random.rand(*shape)
+
+    # If alphas are very close to 0 this makes the problem very difficult due to large
+    # values of ``f``.
+    alphas *= 100
+
+    return alphas
+
+
+def inf_limits_f_mixed(x_arr, n):
+    x, y, z, w = x_arr[:, 0], x_arr[:, 1], x_arr[:, 2], x_arr[:, 3]
+    res = (x ** n[:, np.newaxis]) * np.sqrt(y) * np.exp(-y-z**2-w**2)
+
+    return res.T
+
+
+def inf_limits_f_mixed_exact(a, b, n):
+    return 1/(2 + 2*n) * math.pi ** (3/2)
+
+
+@pytest.mark.parametrize("problem", [
+    (
+        # Function to integrate
+        inf_limits_f_gaussian,
+
+        # Exact solution
+        inf_limits_f_gaussian_exact,
+
+        # Arguments passed to f
+        (
+            inf_limits_f_gaussian_random_args((1, 1)),
+        ),
+
+        # Limits, has to match the shape of the arguments
+        np.array([-np.inf]),  # a
+        np.array([np.inf]),   # b
+    ),
+    (
+        inf_limits_f_gaussian,
+        inf_limits_f_gaussian_exact,
+        (inf_limits_f_gaussian_random_args((1, 1)),),
+        np.array([0]),
+        np.array([np.inf]),
+    ),
+    (
+        inf_limits_f_gaussian,
+        inf_limits_f_gaussian_exact,
+        (inf_limits_f_gaussian_random_args((1, 1)),),
+        np.array([-np.inf]),
+        np.array([0]),
+    ),
+    (
+        inf_limits_f_gaussian,
+        inf_limits_f_gaussian_exact,
+        (inf_limits_f_gaussian_random_args((1, 4)),),
+        np.array([0, 0, -np.inf, -np.inf]),
+        np.array([np.inf, np.inf, np.inf, np.inf]),
+    ),
+    (
+        inf_limits_f_gaussian,
+        inf_limits_f_gaussian_exact,
+        (inf_limits_f_gaussian_random_args((1, 4)),),
+        np.array([-np.inf, -np.inf, -np.inf, -np.inf]),
+        np.array([0, 0, np.inf, np.inf]),
+    ),
+    (
+        inf_limits_f_gaussian,
+        inf_limits_f_gaussian_exact,
+        (inf_limits_f_gaussian_random_args((2, 2, 3)),),
+        np.array([-np.inf, 0, -np.inf]),
+        np.array([np.inf, np.inf, np.inf]),
+    ),
+    (
+        # f(x, y, z, w) = x^n * sqrt(y) * exp(-y-z**2-w**2) for n in [0,1,2,3,4]
+        inf_limits_f_mixed,
+
+        # This exact solution is for the below limits, not in general
+        inf_limits_f_mixed_exact,
+
+        (np.arange(5),),
+        np.array([0, 0, -np.inf, -np.inf]),
+        np.array([1, np.inf, np.inf, np.inf]),
+    )
+])
+@pytest.mark.parametrize("rule", ["gk15"])
+@pytest.mark.parametrize("rtol", [1e-3])
+@pytest.mark.parametrize("atol", [1e-4])
+def test_cub_infinite_limits(problem, rule, rtol, atol):
+    np.random.seed(1)
+
+    f, exact, args, a, b = problem
+
+    res = cubature(
+        f,
+        a,
+        b,
+        rule,
+        rtol,
+        atol,
+        args=args,
+    )
+
+    assert res.status == "converged"
+
+    assert_allclose(
+        res.estimate,
+        exact(a, b, *args),
+        rtol=rtol,
+        atol=atol,
+        err_msg=f"error_estimate={res.error}, subdivisions={res.subdivisions}"
+    )
+
+
+@pytest.mark.parametrize("problem", [
+    (
+        # Integrate
+        #   f(x_1, x_2, x_3) = x_1
+        # with limits
+        #   a = [0, 0, 0]
+        #   b = [1, 1, 1]
+
+        # f
+        lambda x: x[:, 0],
+
+        # exact solution
+        0.5,
+
+        # args
+        (),
+
+        # a & b
+        np.array([0, 0]),
+        np.array([1, 1]),
+
+        # region, here just constants
+        lambda x: (
+            np.array([np.zeros(x.shape[0])]),
+            np.array([np.ones(x.shape[0])]),
+        )
+    ),
+    (
+        # Integrate
+        #   f(x_1, x_2, x_3) = 1
+        # with limits
+        #   a = [0, 0, 0]
+        #   b = [1, 1, x_1 * x_2]
+
+        lambda x: np.ones(x.shape[0]),
+        0.25,
+        (),
+        np.array([0, 0]),
+        np.array([1, 1]),
+        lambda x: (
+            np.array([np.zeros(x.shape[0])]),
+            np.array([x[:, 0] * x[:, 1]]),
+        )
+    ),
+    (
+        # Integrate
+        #   f(x_1, ..., x_n) = 1
+        # with limits
+        #   a = [-1, -sqrt(1 - x_1**2)]
+        #   b = [1, sqrt(1 - x_1**2)]
+
+        lambda x: np.ones(x.shape[0]),
+        np.pi,
+        (),
+        np.array([-1]),
+        np.array([1]),
+        lambda x: (
+            np.array([-np.sqrt(1 - x[:, 0]**2)]),
+            np.array([np.sqrt(1 - x[:, 0]**2)]),
+        )
+    ),
+    (
+        # Integrate
+        #   f(x_1, x_2) = 1
+        # with limits
+        #   a = [-inf, -exp(-x_1**2)]
+        #   b = [inf, exp(x_1**2)]
+
+        lambda x: np.ones(x.shape[0]),
+        2*math.sqrt(np.pi),
+        (),
+        np.array([-np.inf]),
+        np.array([np.inf]),
+        lambda x: (
+            np.array([-np.exp(-x[:, 0]**2)]),
+            np.array([np.exp(-x[:, 0]**2)]),
+        )
+    ),
+    (
+        # Integrate
+        #   f(x_1, x_2) = n
+        # with limits
+        #   a = [-inf, -exp(-x_1**2)]
+        #   b = [inf, exp(x_1**2)]
+        # for n = range(5)
+
+        lambda x, n: np.tile(n, (x.shape[0], 1)),
+        np.arange(5) * 2*math.sqrt(np.pi),
+        (np.arange(5),),
+        np.array([-np.inf]),
+        np.array([np.inf]),
+        lambda x: (
+            np.array([-np.exp(-x[:, 0]**2)]),
+            np.array([np.exp(-x[:, 0]**2)]),
+        )
+    )
+])
+@pytest.mark.parametrize("rule", ["gk15"])
+@pytest.mark.parametrize("rtol", [1e-3])
+@pytest.mark.parametrize("atol", [1e-4])
+def test_cub_func_limits(problem, rule, rtol, atol):
+    f, exact, args, a_outer, b_outer, region = problem
+
+    res = cubature(
+        f,
+        a_outer,
+        b_outer,
+        rule,
+        rtol,
+        atol,
+        args=args,
+        region=region,
+    )
+
+    assert res.status == "converged"
+
+    assert_allclose(
+        res.estimate,
+        exact,
+        rtol=rtol,
+        atol=atol,
+        err_msg=f"error_estimate={res.error}, subdivisions={res.subdivisions}"
+    )
