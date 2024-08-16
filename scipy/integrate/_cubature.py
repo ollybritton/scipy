@@ -39,8 +39,12 @@ class CubatureResult:
     rtol: float
 
 
-def cubature(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=10000,
-             args=(), kwargs=None, workers=1, points=None):
+def cubature(f, a=None, b=None, rule="gk21",
+             rtol=1e-05, atol=1e-08,
+             max_subdivisions=10000,
+             args=(), kwargs=None,
+             workers=1, points=None, tr=None,
+             region=None):
     r"""
     Adaptive cubature of multidimensional array-valued function.
 
@@ -200,35 +204,45 @@ def cubature(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=1000
     points = [] if points is None else points
 
     # Convert a and b to arrays of at least 1D
-    a_orig = np.atleast_1d(a)
-    b_orig = np.atleast_1d(b)
+    a = np.atleast_1d(a)
+    b = np.atleast_1d(b)
 
-    if a_orig.ndim != 1 or b_orig.ndim != 1:
+    if a.ndim != 1 or b.ndim != 1:
         raise ValueError("a and b should be 1D arrays")
 
-    # If any limits are the wrong way around, flip them and keep track of the sign.
-    sign = (-1) ** np.sum(a_orig > b_orig)  # false = 0, true = 1
-    a = np.min([a_orig, b_orig], axis=0)
-    b = np.max([a_orig, b_orig], axis=0)
+    if region is not None:
+        # TODO: report error if incompatible options
+        f = FuncLimitsTransform(f, a, b, region)
+        a, b = f.limits
 
-    # Apply any variable transformations to e.g. handle infinite limits
-    if np.any(np.isinf(a)) or np.any(np.isinf(b)):
-        f_transformed = InfiniteLimitsTransform(f, a, b)
-        a_transformed, b_transformed = f_transformed.limits
-        points.extend(f_transformed.points)
+    # Apply a transformation if one was specified
+    if tr is not None:
+        f = tr(f, a, b)
+        a, b = f.limits
+
+    # If any limits are the wrong way around, flip them and keep track of the sign.
+    sign = (-1) ** np.sum(a > b)  # false = 0, true = 1
+    a_flipped = np.min(np.array([a, b]), axis=0)
+    b_flipped = np.max(np.array([a, b]), axis=0)
+
+    # If necessary, apply a transformation to handle infinite limits
+    if np.any(np.isinf(a_flipped)) or np.any(np.isinf(b_flipped)):
+        f = InfiniteLimitsTransform(f, a_flipped, b_flipped)
+        a, b = f.limits
+        points.extend(f.points)
     else:
-        f_transformed = f
-        a_transformed, b_transformed = a, b
+        f = f
+        a, b = a_flipped, b_flipped
 
     # If any problematic points are specified, divide the initial region so that
     # these points lie on the edge of a subregion, which means ``f`` won't be evaluated
     # there (if the rule being used has no evaluation points on the boundary).
     if points == []:
-        initial_regions = [(a_transformed, b_transformed)]
+        initial_regions = [(a, b)]
     else:
-        initial_regions = _split_at_points(a_transformed, b_transformed, points)
+        initial_regions = _split_at_points(a, b, points)
 
-    # If the rule is a string, convert to a corresponding rule:
+    # If the rule is a string, convert to a corresponding rule
     if isinstance(rule, str):
         ndim = len(a)
 
@@ -267,10 +281,10 @@ def cubature(f, a, b, rule="gk21", rtol=1e-05, atol=1e-08, max_subdivisions=1000
         # If any of the initial regions have zero width in one dimension, we can
         # ignore this as the integral will be 0 there.
         if not np.any(a_k == b_k):
-            est_k = rule.estimate(f_transformed, a_k, b_k, args, kwargs)
+            est_k = rule.estimate(f, a_k, b_k, args, kwargs)
 
             try:
-                err_k = rule.estimate_error(f_transformed, a_k, b_k, args, kwargs)
+                err_k = rule.estimate_error(f, a_k, b_k, args, kwargs)
             except NotImplementedError:
                 raise ValueError("attempting cubature with a rule that doesn't \
 implement error estimation.")
@@ -308,7 +322,7 @@ implement error estimation.")
             # further subdividing.
 
             executor_args = zip(
-                itertools.repeat(f_transformed),
+                itertools.repeat(f),
                 itertools.repeat(rule),
                 itertools.repeat(args),
                 itertools.repeat(kwargs),
@@ -399,42 +413,42 @@ class InfiniteLimitsTransform(VariableTransform):
         self._orig_a = a
         self._orig_b = b
 
-        self._negate_var = []
-        self._semi_infinite_axes = []
-        self._double_infinite_axes = []
+        self._negate_pos = []
+        self._semi_inf_pos = []
+        self._double_inf_pos = []
 
         for i in range(len(a)):
             if a[i] == -np.inf and b[i] == np.inf:
                 # (-oo, oo) will be mapped to (-1, 1)
-                self._double_infinite_axes.append(i)
+                self._double_inf_pos.append(i)
             elif a[i] != -np.inf and b[i] == np.inf:
                 # (start, oo) will be mapped to (0, 1)
-                self._semi_infinite_axes.append(i)
+                self._semi_inf_pos.append(i)
             elif a[i] == -np.inf and b[i] != np.inf:
                 # (-oo, end) will be mapped to (0, 1)
                 # This is handled by making the transformation t = -x and reducing it to
                 # the other semi-infinite case.
-                self._negate_var.append(i)
-                self._semi_infinite_axes.append(i)
+                self._negate_pos.append(i)
+                self._semi_inf_pos.append(i)
 
                 # Since we flip the limits, we don't need to separately multiply the
                 # integrand by -1.
                 self._orig_a[i] = -b[i]
                 self._orig_b[i] = -a[i]
 
-        self._semi_infinite_axes = np.array(self._semi_infinite_axes)
-        self._double_infinite_axes = np.array(self._double_infinite_axes)
-        self._negate_var = np.array(self._negate_var)
+        self._semi_inf_pos = np.array(self._semi_inf_pos)
+        self._double_inf_pos = np.array(self._double_inf_pos)
+        self._negate_pos = np.array(self._negate_pos)
 
     @property
     def limits(self):
         a, b = np.copy(self._orig_a), np.copy(self._orig_b)
 
-        for index in self._double_infinite_axes:
+        for index in self._double_inf_pos:
             a[index] = -1
             b[index] = 1
 
-        for index in self._semi_infinite_axes:
+        for index in self._semi_inf_pos:
             a[index] = 0
             b[index] = 1
 
@@ -444,7 +458,7 @@ class InfiniteLimitsTransform(VariableTransform):
     def points(self):
         # If there are infinite limits, then the origin will be a problematic point
         # due to a division by zero there
-        if self._double_infinite_axes.size != 0 or self._semi_infinite_axes.size != 0:
+        if self._double_inf_pos.size != 0 or self._semi_inf_pos.size != 0:
             return [np.zeros(self._orig_a.shape)]
         else:
             return []
@@ -452,40 +466,40 @@ class InfiniteLimitsTransform(VariableTransform):
     def __call__(self, t, *args, **kwargs):
         x = np.copy(t)
 
-        if len(self._negate_var) != 0:
-            x[..., self._negate_var] *= -1
+        if len(self._negate_pos) != 0:
+            x[..., self._negate_pos] *= -1
 
-        if self._double_infinite_axes.size != 0:
+        if self._double_inf_pos.size != 0:
             # For (-oo, oo) -> (-1, 1), use the transformation x = (1-|t|)/t.
-            x[..., self._double_infinite_axes] = (
-                1 - np.abs(t[..., self._double_infinite_axes])
-            ) / t[..., self._double_infinite_axes]
+            x[..., self._double_inf_pos] = (
+                1 - np.abs(t[..., self._double_inf_pos])
+            ) / t[..., self._double_inf_pos]
 
-        if self._semi_infinite_axes.size != 0:
+        if self._semi_inf_pos.size != 0:
             # For (start, oo) -> (0, 1), use the transformation x = start + (1 - t)/t.
             #
             # Need to expand start so it is broadcastable, and transpose to flip the
             # axis order.
-            start = self._orig_a[self._semi_infinite_axes][:, np.newaxis].T
+            start = self._orig_a[self._semi_inf_pos][:, np.newaxis].T
 
-            x[..., self._semi_infinite_axes] = start + (
-                1 - t[..., self._semi_infinite_axes]
-            ) / t[..., self._semi_infinite_axes]
+            x[..., self._semi_inf_pos] = start + (
+                1 - t[..., self._semi_inf_pos]
+            ) / t[..., self._semi_inf_pos]
 
         f_x = self._f(x, *args, **kwargs)
 
-        if self._double_infinite_axes.size != 0:
+        if self._double_inf_pos.size != 0:
             scale_factors = np.prod(
-                t[..., self._double_infinite_axes] ** 2,
+                t[..., self._double_inf_pos] ** 2,
                 axis=-1,
             )
             scale_factors = scale_factors.reshape(-1, *([1]*(len(f_x.shape)-1)))
 
             f_x /= scale_factors
 
-        if self._semi_infinite_axes.size != 0:
+        if self._semi_inf_pos.size != 0:
             scale_factors = np.prod(
-                t[..., self._semi_infinite_axes] ** 2,
+                t[..., self._semi_inf_pos] ** 2,
                 axis=-1,
             )
             scale_factors = scale_factors.reshape(-1, *([1]*(len(f_x.shape)-1)))
@@ -493,6 +507,93 @@ class InfiniteLimitsTransform(VariableTransform):
             f_x /= scale_factors
 
         return f_x
+
+
+class FuncLimitsTransform(VariableTransform):
+    r"""
+    Transform an integral with functions as limits to an integral with constant limits.
+
+    Given an integral of the form:
+
+    ..math ::
+
+        \int^{b_1}_{a_1}
+        \cdots
+        \int^{b_n}_{a_n}
+        \int^{B_1(x_1, \ldots, x_n)}_{A_0(x_1, \ldots, x_n)}
+        \cdots
+        \int^{B_m(x_1, \ldots, x_{n+m})}_{A_m(x_1, \ldots, x_{n+m})}
+        f(x_1, \ldots, x_{n+m})
+        dx_{n+m} \cdots dx_1
+
+    an integral with :math:`n` outer non-function limits, and :math:`m` inner function
+    limits, this will transform it into an integral over
+
+        \int^{b_1}_{a_1}
+        \cdots
+        \int^{b_n}_{a_n}
+        \int^{1}_{-1}
+        \cdots
+        \int^{1}_{-1}
+        g(x_1, \ldots, x_n, y_1, \cdots, y_m)
+        dy_m \cdots dy_1 dx_n \cdots dx_1
+
+    Which is an integral over the original outer non-function limits and where a
+    transformation has been applied so that the original function limits become [-1, 1].
+    """
+
+    def __init__(self, f, a, b, region):
+        self._f = f
+        self._a_outer = a
+        self._b_outer = b
+
+        self._region = region
+
+        self._outer_ndim = len(self._a_outer)
+
+        # Without evaluating the region at least once, it's impossible to know the
+        # number of inner variables, which is required to return new limits.
+        a_inner, _ = region(self._a_outer.reshape(1, -1))
+        self._inner_ndim = np.array(a_inner).shape[-1]
+
+    @property
+    def limits(self):
+        return (
+            np.concatenate([self._a_outer, -np.ones(self._inner_ndim)]),
+            np.concatenate([self._b_outer,  np.ones(self._inner_ndim)]),
+        )
+
+    def __call__(self, y, *args, **kwargs):
+        a_inner, b_inner = self._region(y[:, :self._outer_ndim])
+
+        # Allow specifying a_inner and b_inner as array_like rather than as ndarrays
+        # since this is also allowed for a and b.
+        a_inner = np.array(a_inner)
+        b_inner = np.array(b_inner)
+
+        npoints = y.shape[0]
+
+        x = np.concatenate(
+            [
+                y[:, :self._outer_ndim],
+                np.zeros((npoints, self._inner_ndim)),
+            ],
+            axis=-1,
+        )
+
+        for i in range(self._inner_ndim):
+            a_i = a_inner[:, i]
+            b_i = b_inner[:, i]
+
+            x[:, self._outer_ndim + i] = (
+                (b_i + a_i)/2 + (b_i - a_i)/2 * y[:, self._outer_ndim + i]
+            )
+
+        f_x = self._f(x, *args, **kwargs)
+        jacobian = np.prod(b_inner - a_inner, axis=0) / 2**self._inner_ndim
+        jacobian = jacobian.reshape(-1, *([1]*(len(f_x.shape) - 1)))
+
+        return f_x * jacobian
 
 
 def _is_in_region(point, a, b):

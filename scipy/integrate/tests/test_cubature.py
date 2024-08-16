@@ -1171,3 +1171,128 @@ def test_cub_infinite_limits(problem, rule, rtol, atol):
         atol=atol,
         err_msg=f"error_estimate={res.error}, subdivisions={res.subdivisions}"
     )
+
+
+@pytest.mark.parametrize("problem", [
+    (
+        # Integrate
+        #   f(x_1, x_2, x_3) = x_1
+        # with limits
+        #   a = [0, 0, 0]
+        #   b = [1, 1, 1]
+
+        # f
+        lambda x: x[:, 0],
+
+        # exact solution
+        0.5,
+
+        # args
+        (),
+
+        # a & b
+        np.array([0, 0]),
+        np.array([1, 1]),
+
+        # region, here just constants
+        lambda x: (
+            np.array([np.zeros(x.shape[0])]),
+            np.array([np.ones(x.shape[0])]),
+        )
+    ),
+    (
+        # Integrate
+        #   f(x_1, x_2, x_3) = 1
+        # with limits
+        #   a = [0, 0, 0]
+        #   b = [1, 1, x_1 * x_2]
+
+        lambda x: np.ones(x.shape[0]),
+        0.25,
+        (),
+        np.array([0, 0]),
+        np.array([1, 1]),
+        lambda x: (
+            np.array([np.zeros(x.shape[0])]),
+            np.array([x[:, 0] * x[:, 1]]),
+        )
+    ),
+    (
+        # Integrate
+        #   f(x_1, ..., x_n) = 1
+        # with limits
+        #   a = [-1, -sqrt(1 - x_1**2)]
+        #   b = [1, sqrt(1 - x_1**2)]
+
+        lambda x: np.ones(x.shape[0]),
+        np.pi,
+        (),
+        np.array([-1]),
+        np.array([1]),
+        lambda x: (
+            np.array([-np.sqrt(1 - x[:, 0]**2)]),
+            np.array([np.sqrt(1 - x[:, 0]**2)]),
+        )
+    ),
+    (
+        # Integrate
+        #   f(x_1, x_2) = 1
+        # with limits
+        #   a = [-inf, -exp(-x_1**2)]
+        #   b = [inf, exp(x_1**2)]
+
+        lambda x: np.ones(x.shape[0]),
+        2*math.sqrt(np.pi),
+        (),
+        np.array([-np.inf]),
+        np.array([np.inf]),
+        lambda x: (
+            np.array([-np.exp(-x[:, 0]**2)]),
+            np.array([np.exp(-x[:, 0]**2)]),
+        )
+    ),
+    (
+        # Integrate
+        #   f(x_1, x_2) = n
+        # with limits
+        #   a = [-inf, -exp(-x_1**2)]
+        #   b = [inf, exp(x_1**2)]
+        # for n = range(5)
+
+        lambda x, n: np.tile(n, (x.shape[0], 1)),
+        np.arange(5) * 2*math.sqrt(np.pi),
+        (np.arange(5),),
+        np.array([-np.inf]),
+        np.array([np.inf]),
+        lambda x: (
+            np.array([-np.exp(-x[:, 0]**2)]),
+            np.array([np.exp(-x[:, 0]**2)]),
+        )
+    )
+])
+@pytest.mark.parametrize("rule", ["gk15"])
+@pytest.mark.parametrize("rtol", [1e-3])
+@pytest.mark.parametrize("atol", [1e-4])
+def test_cub_func_limits(problem, rule, rtol, atol):
+    f, exact, args, a_outer, b_outer, region = problem
+
+    res = cubature(
+        f,
+        a_outer,
+        b_outer,
+        rule,
+        rtol,
+        atol,
+        args=args,
+        region=region,
+    )
+
+    assert res.status == "converged"
+
+    assert_allclose(
+        res.estimate,
+        exact,
+        rtol=rtol,
+        atol=atol,
+        err_msg=f"error_estimate={res.error}, subdivisions={res.subdivisions}"
+    )
