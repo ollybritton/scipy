@@ -43,7 +43,7 @@ def cubature(f, a=None, b=None, rule="gk21",
              rtol=1e-05, atol=1e-08,
              max_subdivisions=10000,
              args=(), kwargs=None,
-             workers=1, points=None, tr=None,
+             workers=1, points=None,
              region=None):
     r"""
     Adaptive cubature of multidimensional array-valued function.
@@ -71,8 +71,7 @@ def cubature(f, a=None, b=None, rule="gk21",
     a, b : array_like or float
         Lower and upper limits of integration as rank-1 arrays specifying the left and
         right endpoints of the intervals being integrated over. If a float is passed,
-        these will be converted to singleton arrays. Infinite limits are currently not
-        supported.
+        these will be converted to singleton arrays. May be infinite.
     rule : str, optional
         Rule used to estimate the integral. If passing a string, the options are
         "gauss-kronrod" (21 node), "newton-cotes" (5 node) or "genz-malik" (degree 7).
@@ -99,6 +98,15 @@ def cubature(f, a=None, b=None, rule="gk21",
         map-like callable, such as :meth:`python:multiprocessing.pool.Pool.map` for
         evaluating the population in parallel. This evaluation is carried out as
         ``workers(func, iterable)``.
+    points : list of (ndarray, ndarray), optional
+        List of breakpoints to avoid evaluating `f` at, given as a list of coordinates.
+        Default is None.
+    region : callable, optional
+        Optional function describing a non-rectangular region to integrate as a function
+        of the signature::
+            region(x : ndarray) -> (ndarray, ndarray)
+
+        Where ``x`` is the current value of the outer variables. See Examples.
 
     Returns
     -------
@@ -184,6 +192,26 @@ def cubature(f, a=None, b=None, rule="gk21",
     When this is done with process-based parallelization (as would be the case passing
     `workers` as an integer, you should ensure the main module is import-safe.
 
+    The `region` argument can also be used to integrate over a non-rectangular region.
+    For example, to integrate :math:`(x + y)^{2n}` over the unit circle for ``n`` from
+    0 to 4:
+
+    >>> def f(x, n):
+    ...     return np.sum(x, axis=-1).reshape(-1, 1)**(2*n)
+    >>> def circle(x):
+    ...     return (
+    ...         [-np.sqrt(1-x[:, 0]**2)],
+    ...         [np.sqrt(1-x[:, 0]**2)],
+    ...     )
+    >>> cubature(f, [-1], [1], region=circle)
+     array([3.14159358, 1.53904159, 1.55080356, 2.00424461])
+
+    `region` expects a function of the signature::
+        region(x : ndarray) -> (ndarray, ndarray)
+
+    which returns what the inner limits of the integral would be given that the outer
+    variables are ``x``.
+
     Notes
     -----
 
@@ -210,24 +238,21 @@ def cubature(f, a=None, b=None, rule="gk21",
     if a.ndim != 1 or b.ndim != 1:
         raise ValueError("a and b should be 1D arrays")
 
+    # If `region` is specified, apply a transformation to reduce to integration over
+    # a rectangular region.
     if region is not None:
-        # TODO: report error if incompatible options
-        f = FuncLimitsTransform(f, a, b, region)
+        f = _FuncLimitsTransform(f, a, b, region)
         a, b = f.limits
 
-    # Apply a transformation if one was specified
-    if tr is not None:
-        f = tr(f, a, b)
-        a, b = f.limits
-
-    # If any limits are the wrong way around, flip them and keep track of the sign.
-    sign = (-1) ** np.sum(a > b)  # false = 0, true = 1
+    # If any of limits are the wrong way around (a > b), flip them and keep track of
+    # the sign.
+    sign = (-1) ** np.sum(a > b)
     a_flipped = np.min(np.array([a, b]), axis=0)
     b_flipped = np.max(np.array([a, b]), axis=0)
 
-    # If necessary, apply a transformation to handle infinite limits
+    # If any of the limits are infinite, apply a transformation to handle these
     if np.any(np.isinf(a_flipped)) or np.any(np.isinf(b_flipped)):
-        f = InfiniteLimitsTransform(f, a_flipped, b_flipped)
+        f = _InfiniteLimitsTransform(f, a_flipped, b_flipped)
         a, b = f.limits
         points.extend(f.points)
     else:
@@ -235,8 +260,9 @@ def cubature(f, a=None, b=None, rule="gk21",
         a, b = a_flipped, b_flipped
 
     # If any problematic points are specified, divide the initial region so that
-    # these points lie on the edge of a subregion, which means ``f`` won't be evaluated
-    # there (if the rule being used has no evaluation points on the boundary).
+    # these points lie on the edge of a subregion.
+    # This means ``f`` won't be evaluated there, if the rule being used has no
+    # evaluation points on the boundary.
     if points == []:
         initial_regions = [(a, b)]
     else:
@@ -276,20 +302,15 @@ def cubature(f, a=None, b=None, rule="gk21",
     est = 0
     err = 0
 
-    # Compute the estimates over the initial regions
+    # Compute an estimate over each of the initial regions
     for a_k, b_k in initial_regions:
         # If any of the initial regions have zero width in one dimension, we can
         # ignore this as the integral will be 0 there.
         if not np.any(a_k == b_k):
             est_k = rule.estimate(f, a_k, b_k, args, kwargs)
-
-            try:
-                err_k = rule.estimate_error(f, a_k, b_k, args, kwargs)
-            except NotImplementedError:
-                raise ValueError("attempting cubature with a rule that doesn't \
-implement error estimation.")
-
+            err_k = rule.estimate_error(f, a_k, b_k, args, kwargs)
             regions.append(CubatureRegion(est_k, err_k, a_k, b_k))
+
             est += est_k
             err += err_k
 
@@ -394,20 +415,46 @@ def _subregion_coordinates(a, b, split_at=None):
         yield np.array(a_sub), np.array(b_sub)
 
 
-class VariableTransform:
+class _VariableTransform:
     @property
     def limits(self):
+        """
+        New limits after applying the transformation.
+        """
+
         raise NotImplementedError
 
     @property
     def points(self):
+        """
+        Any problematic points introduced by the transformation to avoid evaluating.
+        """
+
         return []
 
-    def __call__(self, x, *args, **kwargs):
+    def __call__(self, t, *args, **kwargs):
+        """
+        `f` after the transformation.
+        """
+
         raise NotImplementedError
 
 
-class InfiniteLimitsTransform(VariableTransform):
+class _InfiniteLimitsTransform(_VariableTransform):
+    r"""
+    Given ``f`` and the limits ``a`` and ``b``, apply a transformation to ``f`` to map
+    any infinite limits to a finite interval.
+
+    `math:`[-\infty, \infty]` is mapped to `math:`(-1, 1)` using the transformation
+   `math:`x = (1-|t|)/t`.
+
+    `math:`[a, \infty]` is mapped to `math:`(0, 1)` using the transformation
+    `math:`x = a + (1-t)/t`.
+
+    `math:`[-\infty, b]` is mapped to `math:`(0, 1)` using the transformation
+    `math:`x = a - (1+t)/t`.
+    """
+
     def __init__(self, f, a, b):
         self._f = f
         self._orig_a = a
@@ -419,13 +466,16 @@ class InfiniteLimitsTransform(VariableTransform):
 
         for i in range(len(a)):
             if a[i] == -np.inf and b[i] == np.inf:
-                # (-oo, oo) will be mapped to (-1, 1)
+                # (-oo, oo) will be mapped to (-1, 1).
                 self._double_inf_pos.append(i)
+
             elif a[i] != -np.inf and b[i] == np.inf:
-                # (start, oo) will be mapped to (0, 1)
+                # (start, oo) will be mapped to (0, 1).
                 self._semi_inf_pos.append(i)
+
             elif a[i] == -np.inf and b[i] != np.inf:
-                # (-oo, end) will be mapped to (0, 1)
+                # (-oo, end) will be mapped to (0, 1).
+                #
                 # This is handled by making the transformation t = -x and reducing it to
                 # the other semi-infinite case.
                 self._negate_pos.append(i)
@@ -456,8 +506,8 @@ class InfiniteLimitsTransform(VariableTransform):
 
     @property
     def points(self):
-        # If there are infinite limits, then the origin will be a problematic point
-        # due to a division by zero there
+        # If there are infinite limits, then the origin becomes a problematic point
+        # due to a division by zero there.
         if self._double_inf_pos.size != 0 or self._semi_inf_pos.size != 0:
             return [np.zeros(self._orig_a.shape)]
         else:
@@ -466,18 +516,19 @@ class InfiniteLimitsTransform(VariableTransform):
     def __call__(self, t, *args, **kwargs):
         x = np.copy(t)
 
-        if len(self._negate_pos) != 0:
+        if self._negate_pos.size != 0:
             x[..., self._negate_pos] *= -1
 
         if self._double_inf_pos.size != 0:
             # For (-oo, oo) -> (-1, 1), use the transformation x = (1-|t|)/t.
+
             x[..., self._double_inf_pos] = (
                 1 - np.abs(t[..., self._double_inf_pos])
             ) / t[..., self._double_inf_pos]
 
         if self._semi_inf_pos.size != 0:
             # For (start, oo) -> (0, 1), use the transformation x = start + (1 - t)/t.
-            #
+
             # Need to expand start so it is broadcastable, and transpose to flip the
             # axis order.
             start = self._orig_a[self._semi_inf_pos][:, np.newaxis].T
@@ -487,29 +538,26 @@ class InfiniteLimitsTransform(VariableTransform):
             ) / t[..., self._semi_inf_pos]
 
         f_x = self._f(x, *args, **kwargs)
+        jacobian = 1
 
         if self._double_inf_pos.size != 0:
-            scale_factors = np.prod(
+            jacobian *= 1/np.prod(
                 t[..., self._double_inf_pos] ** 2,
                 axis=-1,
             )
-            scale_factors = scale_factors.reshape(-1, *([1]*(len(f_x.shape)-1)))
-
-            f_x /= scale_factors
 
         if self._semi_inf_pos.size != 0:
-            scale_factors = np.prod(
+            jacobian *= 1/np.prod(
                 t[..., self._semi_inf_pos] ** 2,
                 axis=-1,
             )
-            scale_factors = scale_factors.reshape(-1, *([1]*(len(f_x.shape)-1)))
 
-            f_x /= scale_factors
+        jacobian = jacobian.reshape(-1, *([1]*(len(f_x.shape)-1)))
 
-        return f_x
+        return f_x * jacobian
 
 
-class FuncLimitsTransform(VariableTransform):
+class _FuncLimitsTransform(_VariableTransform):
     r"""
     Transform an integral with functions as limits to an integral with constant limits.
 
@@ -528,6 +576,8 @@ class FuncLimitsTransform(VariableTransform):
 
     an integral with :math:`n` outer non-function limits, and :math:`m` inner function
     limits, this will transform it into an integral over
+
+    ..math::
 
         \int^{b_1}_{a_1}
         \cdots
@@ -549,9 +599,10 @@ class FuncLimitsTransform(VariableTransform):
 
         self._region = region
 
+        # The "outer dimension" here is the number of the outer non-function limits.
         self._outer_ndim = len(self._a_outer)
 
-        # Without evaluating the region at least once, it's impossible to know the
+        # Without evaluating `region`` at least once, it's impossible to know the
         # number of inner variables, which is required to return new limits.
         a_inner, _ = region(self._a_outer.reshape(1, -1))
         self._inner_ndim = np.array(a_inner).shape[-1]
@@ -566,8 +617,8 @@ class FuncLimitsTransform(VariableTransform):
     def __call__(self, y, *args, **kwargs):
         a_inner, b_inner = self._region(y[:, :self._outer_ndim])
 
-        # Allow specifying a_inner and b_inner as array_like rather than as ndarrays
-        # since this is also allowed for a and b.
+        # Allow returning `a_inner` and `b_inner` as array_like rather than as ndarrays
+        # since `a` and `b` can also be array_like.
         a_inner = np.array(a_inner)
         b_inner = np.array(b_inner)
 
@@ -596,29 +647,37 @@ class FuncLimitsTransform(VariableTransform):
         return f_x * jacobian
 
 
-def _is_in_region(point, a, b):
+def _is_strictly_in_region(point, a, b):
     if (point == a).all() or (point == b).all():
         return False
+
     return (a <= point).all() and (point <= b).all()
 
 
 def _split_at_points(a, b, points):
+    """
+    Given the integration limits `a` and `b` describing a rectangular region and a list
+    of `points`, find the list of ``[(a_1, b_1), ..., (a_l, b_l)]`` which breaks up the
+    initial region into smaller subregions such that no `points` lie strictly inside
+    any of the subregions.
+    """
+
     points = np.sort(points)
+    regions = [(a, b)]
 
-    for i, point in enumerate(points):
-        if _is_in_region(point, a, b):
-            regions = []
-            points_ = np.delete(points, i, axis=0)
+    for point in points:
+        new_regions = []
 
-            for a_k, b_k in _subregion_coordinates(a, b, point):
-                splits = _split_at_points(a_k, b_k, points_)
+        for a_k, b_k in regions:
+            if _is_strictly_in_region(point, a_k, b_k):
+                subregions = _subregion_coordinates(a_k, b_k, point)
+                new_regions.extend(subregions)
+            else:
+                new_regions.append((a_k, b_k))
 
-                if splits is not None:
-                    regions.extend(splits)
+        regions = new_regions
 
-            return regions
-
-    return [(a, b)]
+    return regions
 
 
 def _max_norm(x):
